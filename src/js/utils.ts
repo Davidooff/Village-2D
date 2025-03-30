@@ -2,10 +2,25 @@ import { Vector2, GameSettings, type MyText, type Sprite } from './gamelib.ts';
 import { borders, ItemIDs } from './ItemIDs.ts';
 import * as MapItems from './MapItems.ts';
 import { BoundaryConstructor, classNames, GameMapConstructor } from './types.ts';
-import { type NPC, type Player } from './items.ts';
+import { type Player } from './items.ts';
+import { NPC } from './npc.ts';
+import { PathTree } from './pathTree.ts';
 
 // -----------------------------------------------------------------------------
 // ОДИН объект колизии
+
+export interface Point {
+  x: number;
+  y: number;
+}
+
+export type Line = { p1: Point; p2: Point };
+
+export type Rectangle = Line;
+
+function isPointInRange(point: Point, range: Rectangle): boolean {
+  return point.x >= range.p1.x && point.x <= range.p2.x && point.y >= range.p1.y && point.y <= range.p2.y;
+}
 
 export class Boundary {
   mapPosition: Vector2;
@@ -88,6 +103,46 @@ export class Boundary {
     );
   }
 
+  toPoints(): [Point, Point, Point, Point] {
+    return [
+      { x: this.mapPosition.x, y: this.mapPosition.y },
+      { x: this.mapPosition.x, y: this.mapPosition.y + this.height },
+      { x: this.mapPosition.x + this.width, y: this.mapPosition.y },
+      { x: this.mapPosition.x + this.width, y: this.mapPosition.y + this.height },
+    ];
+  }
+
+  inflate(x: number, y: number): Rectangle {
+    return {
+      p1: {
+        x: this.mapPosition.x - x / 2,
+        y: this.mapPosition.y - y / 2,
+      },
+      p2: {
+        x: this.mapPosition.x + this.width + x / 2,
+        y: this.mapPosition.y + this.height + y / 2,
+      },
+    };
+  }
+
+  static vectorsToEachVertice(startingPoint: Point, rec: Rectangle): [Line, Line, Line, Line] {
+    return [
+      { p1: startingPoint, p2: rec.p1 },
+      { p1: startingPoint, p2: rec.p2 },
+      { p1: startingPoint, p2: { x: rec.p1.x, y: rec.p2.y } },
+      { p1: startingPoint, p2: { x: rec.p2.x, y: rec.p1.y } },
+    ];
+  }
+
+  static rectToLines(rect: Rectangle): [Line, Line, Line, Line] {
+    return [
+      { p1: rect.p1, p2: { x: rect.p1.x, y: rect.p2.y } },
+      { p1: rect.p1, p2: { x: rect.p2.x, y: rect.p1.y } },
+      { p1: rect.p2, p2: { x: rect.p1.x, y: rect.p2.y } },
+      { p1: rect.p2, p2: { x: rect.p2.x, y: rect.p1.y } },
+    ];
+  }
+
   draw(ctx: CanvasRenderingContext2D) {
     if (this.height) {
       ctx.fillStyle = 'rgba(255, 0, 0, 0.3)';
@@ -125,25 +180,110 @@ export class Collisions {
   static col(collisions: (number | number[])[]) {
     Collisions.items = [];
     Collisions.boundaries = Object.entries(collisions).reduce((acc: Boundary[], [key, cell], index) => {
-      
       const row = index % Collisions.width;
       const col = Math.floor(index / Collisions.width);
-
-      // acc.push(
-      // 	new Boundary({
-      // 		GameMap,
-      // 		x: 1400,
-      // 		y: 500,
-      // 		action: 1,
-      // 		width: 100,
-      // 	})
-      // )
 
       const newBoundaries = Action.processObject(row, col, cell);
       acc.push(...newBoundaries);
 
       return acc;
     }, []);
+  }
+
+  static getLineIntersection(line1: Line, line2: Line): Point | null {
+    const { p1: A, p2: B } = line1;
+    const { p1: C, p2: D } = line2;
+
+    const det = (B.x - A.x) * (D.y - C.y) - (B.y - A.y) * (D.x - C.x);
+
+    if (det === 0) {
+      return null; // Lines are parallel or coincident
+    }
+
+    const t = ((C.x - A.x) * (D.y - C.y) - (C.y - A.y) * (D.x - C.x)) / det;
+    const u = ((C.x - A.x) * (B.y - A.y) - (C.y - A.y) * (B.x - A.x)) / det;
+
+    if (t >= 0 && t <= 1 && u >= 0 && u <= 1) {
+      return {
+        x: A.x + t * (B.x - A.x),
+        y: A.y + t * (B.y - A.y),
+      };
+    }
+
+    return null; // Intersection is outside the segments
+  }
+
+  static findInRenge(range: Rectangle) {
+    return Collisions.boundaries.filter((b) => {
+      const points = b.toPoints();
+      return (
+        isPointInRange(points[0], range) ||
+        isPointInRange(points[1], range) ||
+        isPointInRange(points[2], range) ||
+        isPointInRange(points[3], range)
+      );
+    });
+  }
+
+  static findNearestCollisionOnVector(
+    b: Boundary[],
+    pathVector: Line,
+    inflate: { width: number; height: number }
+  ): { b: Boundary; line: Line; p: Point; len: number } | null {
+    // searching for closed collisions
+    let closedCollision: { b: Boundary; line: Line; p: Point; len: number } | null = null;
+    for (const collision of b) {
+      const collisionLines = Boundary.rectToLines(collision.inflate(inflate.width, inflate.height));
+
+      collisionLines.forEach((line) => {
+        const collIntPoint = Collisions.getLineIntersection(line, pathVector);
+        if (collIntPoint) {
+          const coll = {
+            b: collision,
+            line: pathVector,
+            p: collIntPoint,
+            len: Vector2.getLength(collIntPoint.x - pathVector.p1.x, collIntPoint.y - pathVector.p1.x),
+          };
+
+          if (!closedCollision || coll.len < closedCollision.len) {
+            closedCollision = coll;
+          }
+        }
+      });
+    }
+    return closedCollision ? closedCollision : null;
+  }
+
+  static processCollisions(b: Boundary[], pathVector: Line, inflate: { width: number; height: number }) {
+    let nearestCollision = Collisions.findNearestCollisionOnVector(b, pathVector, inflate);
+
+    // No collisions on the way
+    if (!nearestCollision) return [{ p: pathVector.p2, next: null }];
+
+    let linesToEachVerticeOfCollision = Boundary.vectorsToEachVertice(
+      pathVector.p1,
+      nearestCollision.b.inflate(inflate.width, inflate.height)
+    );
+
+    console.log('rec collision: ', nearestCollision.b.inflate(inflate.width, inflate.height));
+    console.log('Each line: ', linesToEachVerticeOfCollision);
+    for (let line of linesToEachVerticeOfCollision) {
+      console.log('Line inside each: ', line);
+
+      let nearestColToVerti = { ...Collisions.findNearestCollisionOnVector(b, { ...line }, inflate) };
+
+      console.log('nearest col: ', nearestColToVerti);
+
+      // if (!nearestColToVerti) {
+      // //   return true;
+      // }
+
+      if (nearestColToVerti && PathTree.isEqual(nearestColToVerti.p, line.p2)) {
+        // return true;
+        console.log('Line is fine');
+      }
+      // return false;
+    }
   }
 }
 

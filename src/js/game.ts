@@ -1,9 +1,10 @@
 import { init, GameSettings } from './gamelib.ts';
 import { Action, Collisions } from './utils.ts';
-import { NPC, Player, Resources, Settings } from './items.ts';
-import collisions from '../collisions/collisions.json';
+import { Player, Resources, Settings } from './items.ts';
+import collisions from '../collisions/col.json';
 import { GameMap, type MapItem } from './MapItems.ts';
 import { MovementKey } from './types.ts';
+import { NPC } from './npc.ts';
 
 class Game {
   private ctx: CanvasRenderingContext2D;
