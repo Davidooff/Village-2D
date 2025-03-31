@@ -1,8 +1,9 @@
 import { Point } from './utils';
 
 export interface Path {
+  complit: boolean;
   p: Point;
-  next?: Path[] | null;
+  next: Path[] | null;
 }
 
 export type searchOption = { [key: string]: any };
@@ -10,8 +11,8 @@ export type searchOption = { [key: string]: any };
 export class PathTree {
   tree: Path;
 
-  constructor(startingPoint: Point) {
-    this.tree = { p: startingPoint };
+  constructor(startingPoint: Point, complit: boolean = false) {
+    this.tree = { p: startingPoint, complit, next: [] };
   }
   /**
    * Helper function to compare two values. It handles arrays by checking their content.

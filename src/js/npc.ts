@@ -76,18 +76,34 @@ export class NPC extends Animation {
 
     const possibleCollisions = Collisions.findInRenge(collisionSearchRenge);
 
-    let pathTree = new PathTree({ x: npcMiddleX, y: npcMiddleY });
-    let pToCountionue: Point = { x: npcMiddleX, y: npcMiddleY };
+    let finalPoint: Point = { x: playerMiddleX, y: playerMiddleY };
 
-    let pathVector = {
-      p1: { x: npcMiddleX, y: npcMiddleY },
-      p2: { x: playerMiddleX, y: playerMiddleY },
-    };
+    let pathThree = new PathTree({ x: npcMiddleX, y: npcMiddleY }, false);
 
-    Collisions.processCollisions(possibleCollisions, pathVector, {
-      width: this.boundary.width,
-      height: this.boundary.height,
-    });
+    while (true) {
+      let pathToContinue = pathThree.findFirstBy({ complit: false });
+      console.log(pathToContinue);
+
+      if (!pathToContinue) break;
+
+      if (!pathToContinue.next) {
+        pathToContinue.complit = true;
+        continue;
+      }
+
+      pathToContinue.next = pathToContinue.next.concat(
+        Collisions.processCollisions(
+          possibleCollisions,
+          { p1: pathToContinue.p, p2: finalPoint },
+          {
+            width: this.boundary.width,
+            height: this.boundary.height,
+          }
+        )
+      );
+
+      pathToContinue.complit = true;
+    }
 
     const stepX = (dx / distance) * 1;
     const stepY = (dy / distance) * 1;

@@ -4,7 +4,7 @@ import * as MapItems from './MapItems.ts';
 import { BoundaryConstructor, classNames, GameMapConstructor } from './types.ts';
 import { type Player } from './items.ts';
 import { NPC } from './npc.ts';
-import { PathTree } from './pathTree.ts';
+import { Path, PathTree } from './pathTree.ts';
 
 // -----------------------------------------------------------------------------
 // ОДИН объект колизии
@@ -103,12 +103,15 @@ export class Boundary {
     );
   }
 
-  toPoints(): [Point, Point, Point, Point] {
+  toPoints(inflate: { width: number; height: number } = { width: 0, height: 0 }): [Point, Point, Point, Point] {
     return [
-      { x: this.mapPosition.x, y: this.mapPosition.y },
-      { x: this.mapPosition.x, y: this.mapPosition.y + this.height },
-      { x: this.mapPosition.x + this.width, y: this.mapPosition.y },
-      { x: this.mapPosition.x + this.width, y: this.mapPosition.y + this.height },
+      { x: this.mapPosition.x - inflate.width / 2, y: this.mapPosition.y - inflate.height / 2 },
+      { x: this.mapPosition.x - inflate.width / 2, y: this.mapPosition.y + this.height + inflate.height / 2 },
+      { x: this.mapPosition.x + this.width + inflate.width / 2, y: this.mapPosition.y - inflate.height / 2 },
+      {
+        x: this.mapPosition.x + this.width + inflate.width / 2,
+        y: this.mapPosition.y + this.height + inflate.height / 2,
+      },
     ];
   }
 
@@ -225,6 +228,30 @@ export class Collisions {
     });
   }
 
+  static findCollisionsOnVector(
+    b: Boundary[],
+    pathVector: Line,
+    inflate: { width: number; height: number }
+  ): { b: Boundary; line: Line; p: Point; len: number }[] | null {
+    let collisions: { b: Boundary; line: Line; p: Point; len: number }[] = [];
+    for (const collision of b) {
+      const collisionLines = Boundary.rectToLines(collision.inflate(inflate.width, inflate.height));
+
+      collisionLines.forEach((line) => {
+        const collIntPoint = Collisions.getLineIntersection(line, pathVector);
+        if (collIntPoint) {
+          collisions.push({
+            b: collision,
+            line: pathVector,
+            p: collIntPoint,
+            len: Vector2.getLength(collIntPoint.x - pathVector.p1.x, collIntPoint.y - pathVector.p1.x),
+          });
+        }
+      });
+    }
+    return collisions ? collisions : null;
+  }
+
   static findNearestCollisionOnVector(
     b: Boundary[],
     pathVector: Line,
@@ -254,36 +281,144 @@ export class Collisions {
     return closedCollision ? closedCollision : null;
   }
 
-  static processCollisions(b: Boundary[], pathVector: Line, inflate: { width: number; height: number }) {
+  static tryToGoByRibs(
+    startingPoints: Point[],
+    destinantion: Point,
+    b: Boundary[],
+    collidedObj: Boundary,
+    inflate: { width: number; height: number }
+  ): { path: Path[]; ribCollidedWith: Boundary[] } {
+    const verti = collidedObj.toPoints(inflate);
+    let collidedByTheWayToVertis: Boundary[] = [];
+    let path: Path[] = [];
+
+    for (const startinP of startingPoints) {
+      let processedPoints: Point[] = [startinP];
+      let currentPoints: Point[] = [startinP];
+      // checking is clear path
+      let collisionsToFinish = Collisions.findCollisionsOnVector(b, { p1: startinP, p2: destinantion }, inflate);
+
+      if (collisionsToFinish?.length === 2) {
+        path.push({ p: destinantion, complit: true, next: null });
+        continue;
+      }
+
+      let localPathTree: PathTree = new PathTree(
+        startinP,
+        Collisions.findCollisionsOnVector([collidedObj], { p1: startinP, p2: destinantion }, inflate)?.length === 2
+      );
+      while (true) {
+        // let
+        currentPoints = currentPoints.flatMap((currentP) => {
+          let nextVertisToGo = verti.filter((currentVerti) => {
+            // skip if point is already processed
+            for (const el of processedPoints) if (PathTree.isEqual(el, currentVerti)) return false;
+
+            if (!(currentVerti.x === currentP.x || currentVerti.y === currentP.y)) return false;
+
+            let localRibColl = Collisions.findCollisionsOnVector(b, { p1: currentP, p2: currentVerti }, inflate);
+
+            if (!localRibColl) {
+              throw new Error('Unexpected');
+            }
+
+            if (localRibColl.length === 2) {
+              // collided only with one lines
+              let pathFromPoint = localPathTree.findFirstBy({ p: currentP });
+              if (pathFromPoint?.next === null) return false;
+
+              if (!pathFromPoint?.next) {
+                throw new Error('Unexpected');
+              }
+
+              let collisionsOnTheWay = Collisions.findCollisionsOnVector(
+                b,
+                { p1: currentVerti, p2: destinantion },
+                inflate
+              );
+              let selfCollisions = Collisions.findCollisionsOnVector(
+                [collidedObj],
+                { p1: currentVerti, p2: destinantion },
+                inflate
+              );
+
+              pathFromPoint.next.push({
+                p: currentVerti,
+                complit: selfCollisions ? selfCollisions.length === 2 : false,
+                next: collisionsOnTheWay && collisionsOnTheWay.length <= 2 ? null : [],
+              });
+              return true;
+            } else if (localRibColl.length > 2) {
+              // Take nearest collision on the rib
+              localRibColl.sort((a, b) => a.len - b.len);
+              collidedByTheWayToVertis.push(localRibColl[1].b);
+              return false;
+            } else {
+              throw new Error('Unexpected');
+            }
+          });
+
+          return nextVertisToGo;
+        });
+
+        if (currentPoints.length === 0) break;
+
+        processedPoints = processedPoints.concat(currentPoints);
+      }
+      path.push(localPathTree.tree);
+    }
+    return { path, ribCollidedWith: collidedByTheWayToVertis };
+  }
+
+  static processCollisions(b: Boundary[], pathVector: Line, inflate: { width: number; height: number }): Path[] {
     let nearestCollision = Collisions.findNearestCollisionOnVector(b, pathVector, inflate);
 
     // No collisions on the way
-    if (!nearestCollision) return [{ p: pathVector.p2, next: null }];
+    if (!nearestCollision) return [{ p: pathVector.p2, next: null, complit: true }];
 
-    let linesToEachVerticeOfCollision = Boundary.vectorsToEachVertice(
-      pathVector.p1,
-      nearestCollision.b.inflate(inflate.width, inflate.height)
-    );
+    let pathFromThisPoint: Path[] = [];
+    let boundariesOnTheWayToVerti: Boundary[] = [];
 
-    console.log('rec collision: ', nearestCollision.b.inflate(inflate.width, inflate.height));
-    console.log('Each line: ', linesToEachVerticeOfCollision);
-    for (let line of linesToEachVerticeOfCollision) {
-      console.log('Line inside each: ', line);
-
-      let nearestColToVerti = { ...Collisions.findNearestCollisionOnVector(b, { ...line }, inflate) };
-
-      console.log('nearest col: ', nearestColToVerti);
-
-      // if (!nearestColToVerti) {
-      // //   return true;
-      // }
-
-      if (nearestColToVerti && PathTree.isEqual(nearestColToVerti.p, line.p2)) {
-        // return true;
-        console.log('Line is fine');
+    do {
+      if (boundariesOnTheWayToVerti.length) {
+        nearestCollision.b = boundariesOnTheWayToVerti.shift() as Boundary;
       }
-      // return false;
-    }
+
+      //
+      let linesToEachVerticeOfCollision = Boundary.vectorsToEachVertice(
+        pathVector.p1,
+        nearestCollision.b.inflate(inflate.width, inflate.height)
+      );
+
+      let verticiesPossibleToReach: Point[] = [];
+      for (let line of linesToEachVerticeOfCollision) {
+        // Ошыбка точка может начинатся из угла обекта
+        let nearestColToVerti = Collisions.findNearestCollisionOnVector(b, line, inflate);
+
+        // I NEEED TO UNDERSTAND WHY THIS IS COMING TO TRUE SOMETIMES
+        if (!nearestColToVerti) continue;
+
+        if (nearestColToVerti && PathTree.isEqual(nearestColToVerti.p, line.p2)) {
+          verticiesPossibleToReach.push(line.p2);
+        } else if (!PathTree.isEqual(nearestColToVerti.b.mapPosition, nearestCollision.b.mapPosition)) {
+          boundariesOnTheWayToVerti.push(nearestColToVerti.b);
+        }
+      }
+
+      let pathByRibs = Collisions.tryToGoByRibs(
+        verticiesPossibleToReach,
+        pathVector.p2,
+        b,
+        nearestCollision.b,
+        inflate
+      );
+
+      pathFromThisPoint = pathFromThisPoint.concat(pathByRibs.path);
+
+      boundariesOnTheWayToVerti = boundariesOnTheWayToVerti.concat(pathByRibs.ribCollidedWith);
+    } while (boundariesOnTheWayToVerti.length !== 0);
+
+    return pathFromThisPoint;
   }
 }
 
